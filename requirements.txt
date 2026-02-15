@@ -1,0 +1,6 @@
+streamlit==1.41.0
+google-generativeai==0.8.4
+Pillow==11.1.0
+plotly==6.0.0
+python-dotenv==1.0.1
+pytesseract==0.3.13
