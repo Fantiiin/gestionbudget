@@ -154,3 +154,51 @@ def inject_css():
     }
 </style>
 """, unsafe_allow_html=True)
+    inject_pwa()
+
+
+def inject_pwa():
+    """Inject PWA manifest, meta tags, and service worker registration."""
+    import streamlit.components.v1 as components
+    if "pwa_injected" not in st.session_state:
+        st.session_state["pwa_injected"] = True
+        components.html("""
+            <script>
+                // Inject manifest link
+                if (!document.querySelector('link[rel="manifest"]')) {
+                    var link = document.createElement('link');
+                    link.rel = 'manifest';
+                    link.href = '/app/static/manifest.json';
+                    document.head.appendChild(link);
+                }
+                // Theme color
+                if (!document.querySelector('meta[name="theme-color"]')) {
+                    var meta = document.createElement('meta');
+                    meta.name = 'theme-color';
+                    meta.content = '#a78bfa';
+                    document.head.appendChild(meta);
+                }
+                // Apple mobile web app
+                if (!document.querySelector('meta[name="apple-mobile-web-app-capable"]')) {
+                    var m1 = document.createElement('meta');
+                    m1.name = 'apple-mobile-web-app-capable';
+                    m1.content = 'yes';
+                    document.head.appendChild(m1);
+                    var m2 = document.createElement('meta');
+                    m2.name = 'apple-mobile-web-app-status-bar-style';
+                    m2.content = 'black-translucent';
+                    document.head.appendChild(m2);
+                    var m3 = document.createElement('meta');
+                    m3.name = 'apple-mobile-web-app-title';
+                    m3.content = 'Budget';
+                    document.head.appendChild(m3);
+                }
+                // Register service worker
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.register('/app/static/sw.js', {scope: '/'})
+                        .then(function(reg) { console.log('SW registered', reg.scope); })
+                        .catch(function(err) { console.log('SW failed', err); });
+                }
+            </script>
+        """, height=0)
+
