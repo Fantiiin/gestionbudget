@@ -83,21 +83,38 @@ def configure_gemini():
 
 def ocr_extract_text(image_bytes: bytes) -> str:
     try:
-        import pytesseract
-    except ImportError:
-        raise RuntimeError("📦 `pytesseract` introuvable. `pip install pytesseract`")
-    try:
         image = Image.open(io.BytesIO(image_bytes))
     except Exception:
         raise ValueError("🖼️ Image illisible.")
+
+    # 1) Try Tesseract (fast, local)
     try:
+        import pytesseract
         text = pytesseract.image_to_string(image, lang="fra+eng")
+        if text.strip():
+            return text.strip()
+        text = pytesseract.image_to_string(image, lang="eng")
+        if text.strip():
+            return text.strip()
     except Exception:
-        try:
-            text = pytesseract.image_to_string(image, lang="eng")
-        except Exception:
-            raise RuntimeError("🔧 Tesseract inaccessible.")
-    return text.strip()
+        pass
+
+    # 2) Fallback: EasyOCR (pure Python, works on Streamlit Cloud)
+    try:
+        import easyocr
+        import numpy as np
+        reader = easyocr.Reader(["fr", "en"], gpu=False, verbose=False)
+        img_array = np.array(image)
+        results = reader.readtext(img_array, detail=0)
+        text = "\n".join(results)
+        if text.strip():
+            return text.strip()
+    except ImportError:
+        raise RuntimeError("📦 Aucun OCR disponible. Installez `pytesseract` ou `easyocr`.")
+    except Exception as e:
+        raise RuntimeError(f"🔧 Erreur OCR : {str(e)[:200]}")
+
+    raise ValueError("🖼️ Aucun texte détecté dans l'image.")
 
 
 def ocr_extract_multiple(images: list[tuple[bytes, str]]) -> str:
