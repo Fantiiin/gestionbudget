@@ -1,7 +1,7 @@
 import streamlit as st
 from database import (
     init_db, get_all_categories, get_category_names,
-    insert_category, delete_category, ensure_user_has_categories, AVATAR_LIST,
+    insert_category, delete_category, ensure_user_has_categories,
 )
 from auth import require_auth, get_current_user_id, get_current_user
 from styles import inject_css
@@ -28,28 +28,30 @@ c1, c2 = st.columns(2)
 with c1:
     nc_nom = st.text_input("Nom", key="nc_nom", placeholder="Ex: Shotgun, Légumes…")
 with c2:
-    nc_icon = st.selectbox("Icône", EMOJI_LIST, key="nc_icon", format_func=lambda x: f"{x}")
+    nc_icon = st.selectbox("Icône", EMOJI_LIST, key="nc_icon")
 
 c3, c4 = st.columns(2)
 with c3:
     nc_color = st.color_picker("Couleur", value="#a78bfa", key="nc_color")
 with c4:
-    nc_kw = st.text_input("Mots-clés pour l'IA", key="nc_kw",
-                           placeholder="shotgun, billet, event…",
-                           help="Séparés par des virgules. L'IA utilisera ces mots pour catégoriser automatiquement.")
+    nc_kw = st.text_input("Mots-clés IA", key="nc_kw", placeholder="shotgun, billet…",
+                           help="Séparés par virgules")
+
+nc_sub = st.text_input("Sous-catégories (optionnel)", key="nc_sub",
+                        placeholder="Ex: Courses, Restaurant, Boulangerie",
+                        help="Séparées par virgules. Permet un suivi plus fin.")
 
 # Preview
 if nc_nom:
-    color = nc_color
-    icon = nc_icon
+    sub_preview = f" · {nc_sub}" if nc_sub else ""
     st.markdown(f"""<div class="glass" style="padding:0.6rem 1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:0.5rem">
-            <span style="font-size:1.5rem">{icon}</span>
+            <span style="font-size:1.5rem">{nc_icon}</span>
             <div>
                 <div style="font-weight:600;color:#e2e8f0">{nc_nom}</div>
-                <div style="color:#64748b;font-size:0.72rem">{nc_kw if nc_kw else 'Pas de mots-clés'}</div>
+                <div style="color:#64748b;font-size:0.72rem">{nc_kw or 'Pas de mots-clés'}{sub_preview}</div>
             </div>
-            <div style="margin-left:auto;width:16px;height:16px;border-radius:50%;background:{color}"></div>
+            <div style="margin-left:auto;width:16px;height:16px;border-radius:50%;background:{nc_color}"></div>
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -61,7 +63,16 @@ if st.button("➕ Créer cette catégorie", type="primary", use_container_width=
     elif nc_nom in cat_names:
         st.warning("⚠️ Cette catégorie existe déjà.")
     else:
-        insert_category(uid, nc_nom, nc_icon, nc_color, nc_kw)
+        # We store sous_categories in the categories table directly
+        from database import get_connection
+        conn = get_connection()
+        from datetime import datetime
+        conn.execute(
+            "INSERT INTO categories (user_id, nom, icon, color, mots_cles, sous_categories, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (uid, nc_nom, nc_icon, nc_color, nc_kw, nc_sub, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
         st.success(f"✅ Catégorie '{nc_nom}' créée !")
         st.rerun()
 
@@ -71,20 +82,24 @@ st.markdown("#### 📋 Vos catégories")
 
 cats = get_all_categories(uid)
 if not cats:
-    st.info("Aucune catégorie. Créez-en une ci-dessus.")
+    st.info("Aucune catégorie.")
 else:
     for cat in cats:
         c1, c2 = st.columns([5, 1])
         with c1:
             kw = cat.get("mots_cles", "")
-            kw_display = f" · {kw}" if kw else ""
+            sub = cat.get("sous_categories", "")
+            details = []
+            if kw: details.append(f"🔑 {kw}")
+            if sub: details.append(f"📂 {sub}")
+            detail_str = " · ".join(details) if details else "Pas de détails"
             color = cat.get("color", "#a78bfa")
             st.markdown(f"""<div class="glass" style="padding:0.55rem 1rem;margin-bottom:0.3rem">
                 <div style="display:flex;align-items:center;gap:0.6rem">
                     <span style="font-size:1.2rem">{cat['icon']}</span>
                     <div>
                         <span style="font-weight:600;color:#e2e8f0">{cat['nom']}</span>
-                        <span style="color:#64748b;font-size:0.72rem">{kw_display}</span>
+                        <div style="color:#64748b;font-size:0.7rem">{detail_str}</div>
                     </div>
                     <div style="margin-left:auto;width:12px;height:12px;border-radius:50%;background:{color}"></div>
                 </div>

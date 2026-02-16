@@ -3,10 +3,13 @@ from datetime import datetime, date
 from collections import defaultdict
 
 from database import (
-    init_db, get_all_transactions, get_transactions_by_month, get_monthly_totals,
+    init_db, get_all_transactions, get_transactions_by_month,
+    get_transactions_by_range, get_monthly_totals,
     delete_transaction, apply_recurring_for_month,
     get_category_map, get_category_names, get_friends,
     get_user_by_id, ensure_user_has_categories,
+    get_budgets, export_transactions_csv, update_transaction,
+    get_transaction_by_id,
 )
 from auth import require_auth, get_current_user_id, get_current_user, logout
 from styles import inject_css
@@ -61,12 +64,14 @@ now = datetime.now()
 all_tx = get_all_transactions(viewing_uid)
 
 # ─── Controls ───
-c1, c2, c3, c4 = st.columns([1, 1, 1.5, 1.5])
+PERIODES = ["Mois", "Trimestre", "Semestre", "Année", "Tout"]
+c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1.5, 1.5])
 yrs = sorted(set(t["date"][:4] for t in all_tx if t.get("date") and len(t["date"]) >= 4)) or [str(now.year)]
 with c1: yr = st.selectbox("Année", yrs, index=len(yrs) - 1)
 with c2: mo = st.selectbox("Mois", range(1, 13), index=now.month - 1, format_func=lambda x: MOIS_FR[x].capitalize())
-with c3: view = st.selectbox("Affichage", ["📋 Timeline", "📊 Tableau", "📦 Compact"])
-with c4: filt = st.multiselect("Filtre", view_cat_names, default=[], placeholder="Toutes")
+with c3: periode = st.selectbox("Période", PERIODES, index=0)
+with c4: view = st.selectbox("Affichage", ["📋 Timeline", "📊 Tableau", "📦 Compact"])
+with c5: filt = st.multiselect("Filtre", view_cat_names, default=[], placeholder="Toutes")
 
 # Apply recurring
 if not viewing_readonly:
@@ -74,7 +79,30 @@ if not viewing_readonly:
     if applied > 0:
         st.toast(f"🔁 {applied} récurrent(s) ajouté(s)")
 
-txs = get_transactions_by_month(viewing_uid, int(yr), mo)
+# Get transactions based on period
+if periode == "Mois":
+    txs = get_transactions_by_month(viewing_uid, int(yr), mo)
+elif periode == "Trimestre":
+    q_start = ((mo - 1) // 3) * 3 + 1
+    d_from = f"{yr}-{q_start:02d}-01"
+    q_end_m = q_start + 2
+    import calendar
+    _, ld = calendar.monthrange(int(yr), q_end_m)
+    d_to = f"{yr}-{q_end_m:02d}-{ld}"
+    txs = get_transactions_by_range(viewing_uid, d_from, d_to)
+elif periode == "Semestre":
+    s = 1 if mo <= 6 else 7
+    d_from = f"{yr}-{s:02d}-01"
+    e = 6 if s == 1 else 12
+    import calendar
+    _, ld = calendar.monthrange(int(yr), e)
+    d_to = f"{yr}-{e:02d}-{ld}"
+    txs = get_transactions_by_range(viewing_uid, d_from, d_to)
+elif periode == "Année":
+    txs = get_transactions_by_range(viewing_uid, f"{yr}-01-01", f"{yr}-12-31")
+else:
+    txs = all_tx
+
 if filt:
     txs = [t for t in txs if t["categorie"] in filt]
 
@@ -96,8 +124,14 @@ st.markdown(f"""<div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">🧾 Transactions</div><div class="kpi-val white">{len(txs)}</div></div>
 </div>""", unsafe_allow_html=True)
 
+# ─── Export ───
+if not viewing_readonly:
+    with st.expander("📤 Exporter"):
+        csv_data = export_transactions_csv(uid, int(yr) if periode == "Mois" else None, mo if periode == "Mois" else None)
+        st.download_button("📥 Télécharger CSV", csv_data, file_name=f"budget_{yr}_{mo:02d}.csv", mime="text/csv", use_container_width=True)
+
 if not txs:
-    st.info("Aucune transaction. Allez dans ➕ **Ajouter** pour commencer.")
+    st.info("Aucune transaction pour cette période.")
     st.stop()
 
 # ─── Layout ───
@@ -109,17 +143,31 @@ with col_side:
     for t in txs:
         if t.get("type", "depense") == "depense":
             ct[t["categorie"]] += t["montant_total"]
+
+    budgets = get_budgets(viewing_uid)
+
     if ct:
         mx = max(ct.values())
         for cn, ca in sorted(ct.items(), key=lambda x: x[1], reverse=True):
             pct = (ca / dep * 100) if dep > 0 else 0
-            bp = (ca / mx * 100) if mx > 0 else 0
             ci = view_cat_map.get(cn, {})
             ic = ci.get("icon", "📁")
             co = ci.get("color", "#a78bfa")
+
+            budget_max = budgets.get(cn)
+            if budget_max and budget_max > 0:
+                bp = min((ca / budget_max * 100), 100)
+                over = ca > budget_max
+                bar_color = "#ef4444" if over else co
+                budget_label = f' / {budget_max:.0f}€ {"⚠️" if over else "✓"}'
+            else:
+                bp = (ca / mx * 100) if mx > 0 else 0
+                bar_color = co
+                budget_label = ""
+
             st.markdown(f"""<div class="cat-row">
-                <div class="cat-header"><span class="cat-name">{ic} {cn}</span><span class="cat-amount">{ca:.2f}€ ({pct:.0f}%)</span></div>
-                <div class="cat-track"><div class="cat-fill" style="width:{bp:.0f}%;background:{co}"></div></div>
+                <div class="cat-header"><span class="cat-name">{ic} {cn}</span><span class="cat-amount">{ca:.2f}€{budget_label} ({pct:.0f}%)</span></div>
+                <div class="cat-track"><div class="cat-fill" style="width:{bp:.0f}%;background:{bar_color}"></div></div>
             </div>""", unsafe_allow_html=True)
 
     st.markdown("")
@@ -144,6 +192,35 @@ with col_main:
                 return f'<div class="txn-added">{u.get("avatar","👤")} ajouté par {u["display_name"]}</div>'
         return ""
 
+    # ─── Edit dialog ───
+    if "edit_txn_id" in st.session_state:
+        txn = get_transaction_by_id(st.session_state["edit_txn_id"])
+        if txn:
+            st.markdown("#### ✏️ Modifier la transaction")
+            with st.container():
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    e_ens = st.text_input("Enseigne", value=txn["enseigne"], key="edit_ens")
+                    e_date = st.text_input("Date", value=txn["date"], key="edit_date")
+                    e_tags = st.text_input("Tags", value=txn.get("tags", ""), key="edit_tags", placeholder="#vacances, #pro")
+                with ec2:
+                    e_mt = st.number_input("Montant", value=txn["montant_total"], min_value=0.0, step=0.01, format="%.2f", key="edit_mt")
+                    ci = view_cat_names.index(txn["categorie"]) if txn["categorie"] in view_cat_names else 0
+                    e_cat = st.selectbox("Catégorie", view_cat_names, index=ci, key="edit_cat")
+                    e_type = st.selectbox("Type", ["depense", "revenu"], index=0 if txn.get("type") == "depense" else 1, key="edit_type")
+
+                bc1, bc2 = st.columns(2)
+                with bc1:
+                    if st.button("💾 Sauvegarder", type="primary", use_container_width=True):
+                        update_transaction(txn["id"], e_date, e_ens, e_mt, e_cat, e_type, e_tags, txn.get("sous_categorie", ""))
+                        del st.session_state["edit_txn_id"]
+                        st.success("✅ Modifiée"); st.rerun()
+                with bc2:
+                    if st.button("❌ Annuler", use_container_width=True):
+                        del st.session_state["edit_txn_id"]
+                        st.rerun()
+            st.markdown("---")
+
     # ═══ TIMELINE ═══
     if view == "📋 Timeline":
         st.markdown("#### 📋 Historique")
@@ -165,14 +242,20 @@ with col_main:
                 ac = "green" if ir else "red"
                 sg = "+" if ir else "−"
                 abl = added_by_label(t)
-                tc, dc = st.columns([6, 1])
+                tag_s = ""
+                if t.get("tags"):
+                    tag_s = f'<span style="color:#818cf8;font-size:0.6rem;margin-left:0.3rem">{t["tags"]}</span>'
+                tc, dc, ec = st.columns([5.5, 0.5, 0.5])
                 with tc:
                     st.markdown(f"""<div class="txn"><div class="txn-row"><div class="txn-left">
                         <span class="txn-icon">{ic}</span>
-                        <div><div class="txn-ens">{t['enseigne']}</div><div class="txn-cat">{t['categorie']}</div>{abl}</div>
+                        <div><div class="txn-ens">{t['enseigne']}{tag_s}</div><div class="txn-cat">{t['categorie']}</div>{abl}</div>
                         </div><span class="txn-amt {ac}">{sg}{t['montant_total']:.2f}€</span></div></div>""", unsafe_allow_html=True)
-                with dc:
-                    if not viewing_readonly:
+                if not viewing_readonly:
+                    with dc:
+                        if st.button("✏️", key=f"e{t['id']}"):
+                            st.session_state["edit_txn_id"] = t["id"]; st.rerun()
+                    with ec:
                         if st.button("🗑️", key=f"d{t['id']}"):
                             delete_transaction(t["id"]); st.rerun()
             st.markdown("")
@@ -193,16 +276,23 @@ with col_main:
                 "Date": t["date"], "Enseigne": t["enseigne"] + ab,
                 "Montant": f"{sg}{t['montant_total']:.2f}€",
                 "Catégorie": f"{ci.get('icon','')} {t['categorie']}",
-                "Type": "Revenu" if ir else "Dépense"
+                "Type": "Revenu" if ir else "Dépense",
+                "Tags": t.get("tags", ""),
             })
         sel = st.dataframe(td, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row")
         sr = sel.selection.rows if sel.selection else []
         if sr and not viewing_readonly:
             stx = [txs[i] for i in sr]
             st.markdown(f"**{len(sr)} sélectionnée(s)** — {sum(t['montant_total'] for t in stx):.2f}€")
-            if st.button(f"🗑️ Supprimer ({len(sr)})", type="secondary"):
-                for t in stx: delete_transaction(t["id"])
-                st.success("✅"); st.rerun()
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                if st.button(f"🗑️ Supprimer ({len(sr)})", type="secondary"):
+                    for t in stx: delete_transaction(t["id"])
+                    st.rerun()
+            with bc2:
+                if len(sr) == 1:
+                    if st.button("✏️ Modifier"):
+                        st.session_state["edit_txn_id"] = stx[0]["id"]; st.rerun()
 
     # ═══ COMPACT ═══
     elif view == "📦 Compact":
@@ -213,11 +303,13 @@ with col_main:
             ir = t.get("type") == "revenu"
             sg = "+" if ir else "−"
             co = "#34d399" if ir else "#f87171"
-            c1, c2, c3, c4, c5 = st.columns([0.4, 2.5, 1.5, 1.2, 0.4])
+            c1, c2, c3, c4, c5, c6 = st.columns([0.3, 2.2, 1.3, 1, 0.3, 0.3])
             with c1: st.markdown(f"<span style='font-size:1rem'>{ic}</span>", unsafe_allow_html=True)
             with c2: st.markdown(f"**{t['enseigne']}**")
             with c3: st.caption(format_date_fr(t["date"]))
             with c4: st.markdown(f"<span style='color:{co};font-weight:600'>{sg}{t['montant_total']:.2f}€</span>", unsafe_allow_html=True)
-            with c5:
-                if not viewing_readonly:
+            if not viewing_readonly:
+                with c5:
+                    if st.button("✏️", key=f"ce{t['id']}"): st.session_state["edit_txn_id"] = t["id"]; st.rerun()
+                with c6:
                     if st.button("✕", key=f"cd{t['id']}"): delete_transaction(t["id"]); st.rerun()

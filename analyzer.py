@@ -66,9 +66,18 @@ Si date absente → {today_str}. Montant = décimal positif."""
 
 
 def configure_gemini():
-    api_key = os.getenv("GEMINI_API_KEY")
+    import streamlit as st
+    api_key = None
+    # 1) Streamlit Cloud secrets
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+    # 2) Fallback: .env / environment variable
     if not api_key:
-        raise ValueError("🔑 Clé API manquante. Créez `.env` avec `GEMINI_API_KEY=…`")
+        api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("🔑 Clé API manquante. Ajoutez `GEMINI_API_KEY` dans Streamlit secrets ou `.env`")
     genai.configure(api_key=api_key)
 
 

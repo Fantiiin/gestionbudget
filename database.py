@@ -97,6 +97,53 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS budgets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            categorie TEXT NOT NULL,
+            montant_max REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(user_id, categorie)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS debts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user INTEGER NOT NULL,
+            to_user INTEGER NOT NULL,
+            montant REAL NOT NULL,
+            description TEXT NOT NULL,
+            settled INTEGER NOT NULL DEFAULT 0,
+            transaction_id INTEGER,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            creator_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            categorie TEXT,
+            montant_max REAL NOT NULL,
+            date_debut TEXT NOT NULL,
+            date_fin TEXT NOT NULL,
+            actif INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS challenge_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenge_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            UNIQUE(challenge_id, user_id)
+        )
+    """)
+
     # Migrations
     user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "avatar" not in user_cols:
@@ -109,6 +156,10 @@ def init_db():
         conn.execute("ALTER TABLE transactions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
     if "added_by" not in tx_cols:
         conn.execute("ALTER TABLE transactions ADD COLUMN added_by INTEGER")
+    if "tags" not in tx_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
+    if "sous_categorie" not in tx_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN sous_categorie TEXT NOT NULL DEFAULT ''")
 
     rec_cols = [r[1] for r in conn.execute("PRAGMA table_info(recurring)").fetchall()]
     if "user_id" not in rec_cols:
@@ -117,6 +168,8 @@ def init_db():
     cat_cols = [r[1] for r in conn.execute("PRAGMA table_info(categories)").fetchall()]
     if "user_id" not in cat_cols:
         conn.execute("ALTER TABLE categories ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+    if "sous_categories" not in cat_cols:
+        conn.execute("ALTER TABLE categories ADD COLUMN sous_categories TEXT NOT NULL DEFAULT ''")
 
     conn.commit()
     conn.close()
@@ -433,3 +486,231 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         d["articles"] = []
     if "type" not in d: d["type"] = "depense"
     return d
+
+
+# ─── Budgets ───
+
+def set_budget(user_id: int, categorie: str, montant_max: float):
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO budgets (user_id, categorie, montant_max, created_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id, categorie) DO UPDATE SET montant_max = ?",
+        (user_id, categorie, montant_max, datetime.now().isoformat(), montant_max)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_budgets(user_id: int) -> dict:
+    conn = get_connection()
+    rows = conn.execute("SELECT categorie, montant_max FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
+    conn.close()
+    return {r["categorie"]: r["montant_max"] for r in rows}
+
+
+def delete_budget(user_id: int, categorie: str):
+    conn = get_connection()
+    conn.execute("DELETE FROM budgets WHERE user_id = ? AND categorie = ?", (user_id, categorie))
+    conn.commit()
+    conn.close()
+
+
+# ─── Edit Transaction ───
+
+def update_transaction(txn_id: int, date: str, enseigne: str, montant_total: float,
+                       categorie: str, txn_type: str, tags: str = "", sous_categorie: str = ""):
+    conn = get_connection()
+    conn.execute(
+        """UPDATE transactions SET date=?, enseigne=?, montant_total=?, categorie=?, type=?, tags=?, sous_categorie=?
+           WHERE id=?""",
+        (date, enseigne, montant_total, categorie, txn_type, tags, sous_categorie, txn_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_transaction_by_id(txn_id: int) -> dict | None:
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+    conn.close()
+    return _row_to_dict(row) if row else None
+
+
+# ─── Search ───
+
+def search_transactions(user_id: int, query: str, limit: int = 100) -> list[dict]:
+    conn = get_connection()
+    q = f"%{query}%"
+    rows = conn.execute(
+        """SELECT * FROM transactions WHERE user_id = ?
+           AND (enseigne LIKE ? OR categorie LIKE ? OR tags LIKE ? OR sous_categorie LIKE ?)
+           ORDER BY date DESC LIMIT ?""",
+        (user_id, q, q, q, q, limit)
+    ).fetchall()
+    conn.close()
+    return [_row_to_dict(r) for r in rows]
+
+
+# ─── Multi-month ───
+
+def get_transactions_by_range(user_id: int, date_from: str, date_to: str) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM transactions WHERE user_id = ? AND date >= ? AND date <= ? ORDER BY date DESC",
+        (user_id, date_from, date_to)
+    ).fetchall()
+    conn.close()
+    return [_row_to_dict(r) for r in rows]
+
+
+# ─── Export ───
+
+def export_transactions_csv(user_id: int, year: int = None, month: int = None) -> str:
+    if year and month:
+        txs = get_transactions_by_month(user_id, year, month)
+    else:
+        txs = get_all_transactions(user_id)
+    lines = ["Date,Enseigne,Montant,Catégorie,Sous-catégorie,Type,Tags"]
+    for t in txs:
+        tags = t.get("tags", "")
+        sc = t.get("sous_categorie", "")
+        ens = t["enseigne"].replace(",", ";")
+        lines.append(f'{t["date"]},{ens},{t["montant_total"]:.2f},{t["categorie"]},{sc},{t.get("type","depense")},{tags}')
+    return "\n".join(lines)
+
+
+# ─── Debts ───
+
+def create_debt(from_user: int, to_user: int, montant: float, description: str, transaction_id: int = None):
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO debts (from_user, to_user, montant, description, settled, transaction_id, created_at) VALUES (?,?,?,?,0,?,?)",
+        (from_user, to_user, montant, description, transaction_id, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def settle_debt(debt_id: int):
+    conn = get_connection()
+    conn.execute("UPDATE debts SET settled = 1 WHERE id = ?", (debt_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_debts_between(user_a: int, user_b: int) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT * FROM debts WHERE
+           ((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?))
+           ORDER BY created_at DESC""",
+        (user_a, user_b, user_b, user_a)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_debt_balance(user_id: int, friend_id: int) -> float:
+    """Positive = friend owes user, Negative = user owes friend."""
+    conn = get_connection()
+    owed_to_me = conn.execute(
+        "SELECT COALESCE(SUM(montant), 0) as s FROM debts WHERE from_user = ? AND to_user = ? AND settled = 0",
+        (friend_id, user_id)
+    ).fetchone()["s"]
+    i_owe = conn.execute(
+        "SELECT COALESCE(SUM(montant), 0) as s FROM debts WHERE from_user = ? AND to_user = ? AND settled = 0",
+        (user_id, friend_id)
+    ).fetchone()["s"]
+    conn.close()
+    return owed_to_me - i_owe
+
+
+def get_all_unsettled_debts(user_id: int) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM debts WHERE (from_user = ? OR to_user = ?) AND settled = 0 ORDER BY created_at DESC",
+        (user_id, user_id)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ─── Challenges ───
+
+def create_challenge(creator_id: int, title: str, categorie: str, montant_max: float,
+                     date_debut: str, date_fin: str) -> int:
+    conn = get_connection()
+    cursor = conn.execute(
+        "INSERT INTO challenges (creator_id, title, categorie, montant_max, date_debut, date_fin, actif, created_at) VALUES (?,?,?,?,?,?,1,?)",
+        (creator_id, title, categorie, montant_max, date_debut, date_fin, datetime.now().isoformat())
+    )
+    conn.commit()
+    cid = cursor.lastrowid
+    conn.execute("INSERT INTO challenge_participants (challenge_id, user_id) VALUES (?, ?)", (cid, creator_id))
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def join_challenge(challenge_id: int, user_id: int):
+    conn = get_connection()
+    conn.execute("INSERT OR IGNORE INTO challenge_participants (challenge_id, user_id) VALUES (?, ?)",
+                 (challenge_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_active_challenges(user_id: int) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT c.* FROM challenges c
+        JOIN challenge_participants cp ON cp.challenge_id = c.id
+        WHERE cp.user_id = ? AND c.actif = 1
+        ORDER BY c.date_fin
+    """, (user_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_challenge_participants(challenge_id: int) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT u.id, u.username, u.display_name, u.avatar FROM challenge_participants cp
+        JOIN users u ON u.id = cp.user_id
+        WHERE cp.challenge_id = ?
+    """, (challenge_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_challenge_scores(challenge_id: int) -> list[dict]:
+    conn = get_connection()
+    ch = conn.execute("SELECT * FROM challenges WHERE id = ?", (challenge_id,)).fetchone()
+    if not ch:
+        conn.close()
+        return []
+    ch = dict(ch)
+    participants = get_challenge_participants(challenge_id)
+    scores = []
+    for p in participants:
+        cat_filter = "AND categorie = ?" if ch["categorie"] else ""
+        params = [p["id"], ch["date_debut"], ch["date_fin"]]
+        if ch["categorie"]:
+            params.append(ch["categorie"])
+        total = conn.execute(
+            f"SELECT COALESCE(SUM(montant_total), 0) as s FROM transactions WHERE user_id=? AND date>=? AND date<=? AND type='depense' {cat_filter}",
+            params
+        ).fetchone()["s"]
+        scores.append({**p, "total": total, "max": ch["montant_max"]})
+    conn.close()
+    scores.sort(key=lambda x: x["total"])
+    return scores
+
+
+def delete_challenge(challenge_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM challenge_participants WHERE challenge_id = ?", (challenge_id,))
+    conn.execute("DELETE FROM challenges WHERE id = ?", (challenge_id,))
+    conn.commit()
+    conn.close()
+
