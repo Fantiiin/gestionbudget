@@ -144,10 +144,25 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS savings_goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            target_amount REAL NOT NULL,
+            current_amount REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+
     # Migrations
     user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "avatar" not in user_cols:
         conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT '👤'")
+    if "preferred_page" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN preferred_page TEXT NOT NULL DEFAULT 'Dashboard'")
+    if "theme" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark'")
 
     tx_cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
     if "type" not in tx_cols:
@@ -160,6 +175,8 @@ def init_db():
         conn.execute("ALTER TABLE transactions ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
     if "sous_categorie" not in tx_cols:
         conn.execute("ALTER TABLE transactions ADD COLUMN sous_categorie TEXT NOT NULL DEFAULT ''")
+    if "comment" not in tx_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN comment TEXT NOT NULL DEFAULT ''")
 
     rec_cols = [r[1] for r in conn.execute("PRAGMA table_info(recurring)").fetchall()]
     if "user_id" not in rec_cols:
@@ -408,6 +425,44 @@ def get_monthly_totals(user_id: int) -> list[dict]:
 def delete_transaction(transaction_id: int):
     conn = get_connection()
     conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_unique_enseignes(user_id: int) -> list[str]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT DISTINCT enseigne FROM transactions WHERE user_id = ? ORDER BY enseigne",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    return [r["enseigne"] for r in rows]
+
+
+def duplicate_transaction(txn_id: int) -> int | None:
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    t = dict(row)
+    cursor = conn.execute(
+        """INSERT INTO transactions (user_id, date, enseigne, montant_total, categorie, chemin_image, articles, type, added_by, tags, sous_categorie, comment, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (t["user_id"], date.today().strftime("%Y-%m-%d"), t["enseigne"], t["montant_total"],
+         t["categorie"], t.get("chemin_image", ""), t.get("articles", "[]") if isinstance(t.get("articles"), str) else json.dumps(t.get("articles", [])),
+         t.get("type", "depense"), t.get("added_by"), t.get("tags", ""), t.get("sous_categorie", ""),
+         t.get("comment", ""), datetime.now().isoformat())
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def update_user_preference(user_id: int, key: str, value: str):
+    conn = get_connection()
+    conn.execute(f"UPDATE users SET {key} = ? WHERE id = ?", (value, user_id))
     conn.commit()
     conn.close()
 
@@ -713,4 +768,102 @@ def delete_challenge(challenge_id: int):
     conn.execute("DELETE FROM challenges WHERE id = ?", (challenge_id,))
     conn.commit()
     conn.close()
+
+
+# ─── Savings Goals ───
+
+def create_savings_goal(user_id: int, title: str, target_amount: float) -> int:
+    conn = get_connection()
+    cursor = conn.execute(
+        "INSERT INTO savings_goals (user_id, title, target_amount, current_amount, created_at) VALUES (?,?,?,0,?)",
+        (user_id, title, target_amount, datetime.now().isoformat())
+    )
+    conn.commit()
+    gid = cursor.lastrowid
+    conn.close()
+    return gid
+
+
+def update_savings_goal(goal_id: int, current_amount: float):
+    conn = get_connection()
+    conn.execute("UPDATE savings_goals SET current_amount = ? WHERE id = ?", (current_amount, goal_id))
+    conn.commit()
+    conn.close()
+
+
+def get_savings_goals(user_id: int) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM savings_goals WHERE user_id = ? ORDER BY id", (user_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_savings_goal(goal_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM savings_goals WHERE id = ?", (goal_id,))
+    conn.commit()
+    conn.close()
+
+
+# ─── Smart Budget ───
+
+def get_smart_budget_info(user_id: int, year: int, month: int) -> dict:
+    """Calculate daily allowance based on total budget, days passed, and spending so far."""
+    import calendar
+    budgets = get_budgets(user_id)
+    total_budget = sum(budgets.values())
+    if total_budget <= 0:
+        return {"has_budget": False}
+
+    _, last_day = calendar.monthrange(year, month)
+    today = date.today()
+
+    if today.year == year and today.month == month:
+        day_of_month = today.day
+    else:
+        day_of_month = last_day
+
+    days_remaining = last_day - day_of_month
+    days_elapsed = day_of_month
+
+    # Get spending so far this month
+    txs = get_transactions_by_month(user_id, year, month)
+    spent = sum(t["montant_total"] for t in txs if t.get("type", "depense") == "depense")
+
+    remaining = total_budget - spent
+    daily_ideal = total_budget / last_day
+    daily_allowance = remaining / max(days_remaining, 1) if days_remaining > 0 else 0
+
+    # Spent today
+    today_str = today.strftime("%Y-%m-%d")
+    spent_today = sum(t["montant_total"] for t in txs if t["date"] == today_str and t.get("type", "depense") == "depense")
+
+    # Status
+    if remaining <= 0:
+        status = "over"
+        message = f"⚠️ Budget dépassé de {abs(remaining):.0f}€"
+    elif daily_allowance >= daily_ideal * 1.2:
+        status = "ahead"
+        advance = (daily_allowance - daily_ideal) * days_remaining
+        message = f"🎉 {advance:.0f}€ d'avance ! Tu peux dépenser {daily_allowance:.0f}€/jour"
+    elif daily_allowance >= daily_ideal * 0.8:
+        status = "on_track"
+        message = f"✅ En bonne voie — {daily_allowance:.0f}€/jour restant"
+    else:
+        status = "behind"
+        message = f"⚡ Attention — seulement {daily_allowance:.0f}€/jour restant"
+
+    return {
+        "has_budget": True,
+        "total_budget": total_budget,
+        "spent": spent,
+        "remaining": remaining,
+        "days_remaining": days_remaining,
+        "days_elapsed": days_elapsed,
+        "daily_ideal": daily_ideal,
+        "daily_allowance": daily_allowance,
+        "spent_today": spent_today,
+        "status": status,
+        "message": message,
+    }
 

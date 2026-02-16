@@ -5,6 +5,7 @@ import re
 from database import (
     init_db, insert_transaction, get_category_names, get_all_categories,
     get_friends, get_user_by_id, ensure_user_has_categories, create_debt,
+    get_unique_enseignes,
 )
 from analyzer import analyze_receipts
 from auth import require_auth, get_current_user_id, get_current_user
@@ -19,27 +20,13 @@ uid = get_current_user_id()
 user = get_current_user()
 ensure_user_has_categories(uid)
 
-JOURS_SEMAINE = {"lundi": 0, "mardi": 1, "mercredi": 2, "jeudi": 3, "vendredi": 4, "samedi": 5, "dimanche": 6}
 
-
-def parse_date(raw: str) -> str:
-    if not raw or not raw.strip(): return date.today().strftime("%Y-%m-%d")
-    raw = raw.strip().lower()
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", raw): return raw
-    if re.match(r"^\d{2}/\d{2}/\d{4}$", raw):
-        d, m, y = raw.split("/"); return f"{y}-{m}-{d}"
-    if re.match(r"^\d{2}/\d{2}$", raw):
-        d, m = raw.split("/"); return f"{date.today().year}-{m}-{d}"
-    today = date.today()
-    if raw in ("aujourd'hui", "aujourd hui", "today"): return today.strftime("%Y-%m-%d")
-    if raw in ("hier", "yesterday"): return (today - timedelta(days=1)).strftime("%Y-%m-%d")
-    if raw in ("avant-hier", "avant hier"): return (today - timedelta(days=2)).strftime("%Y-%m-%d")
-    for jour, wn in JOURS_SEMAINE.items():
-        if raw == jour:
-            da = (today.weekday() - wn) % 7
-            if da == 0: da = 7
-            return (today - timedelta(days=da)).strftime("%Y-%m-%d")
-    return raw
+def parse_amount(raw: str) -> float:
+    """Support shortcuts: 2.5k → 2500, 1.2 → 1.20"""
+    raw = raw.strip().lower().replace(",", ".").replace(" ", "")
+    if raw.endswith("k"):
+        return float(raw[:-1]) * 1000
+    return float(raw)
 
 
 def get_subcategories(uid, cat_name):
@@ -57,6 +44,7 @@ for f in friends:
     target_map[f"{f['avatar']} {f['display_name']}"] = f["id"]
 
 cat_names = get_category_names(uid)
+enseignes = get_unique_enseignes(uid)
 
 st.markdown(f"# ➕ Ajouter")
 
@@ -105,13 +93,14 @@ with tab_ia:
                     mt = st.number_input("Montant €", value=txn["montant"], min_value=0.0, step=0.01, format="%.2f", key=f"ai_m{i}")
                 c3, c4, c5 = st.columns(3)
                 with c3:
-                    dt = st.text_input("Date", value=txn["date"], key=f"ai_d{i}")
+                    dt = st.date_input("Date", value=date.today(), key=f"ai_d{i}")
                 with c4:
                     ci = cat_names.index(txn["categorie"]) if txn["categorie"] in cat_names else 0
                     cat = st.selectbox("Catégorie", cat_names, index=ci, key=f"ai_c{i}")
                 with c5:
                     tags = st.text_input("Tags", value="", key=f"ai_tags{i}", placeholder="#vacances")
-                edited.append({"enseigne": ens, "date": parse_date(dt), "montant": mt, "categorie": cat, "type": "depense", "tags": tags})
+                comment = st.text_input("💬 Note", value="", key=f"ai_com{i}", placeholder="optionnel")
+                edited.append({"enseigne": ens, "date": dt.strftime("%Y-%m-%d"), "montant": mt, "categorie": cat, "type": "depense", "tags": tags, "comment": comment})
             st.markdown("---")
 
         if st.button(f"💾 Enregistrer {len(edited)} transaction(s)", type="primary", use_container_width=True, disabled=not edited):
@@ -127,16 +116,19 @@ with tab_ia:
 with tab_man:
     st.markdown("#### ✍️ Ajouter une dépense")
 
-    me = st.text_input("Enseigne", key="man_enseigne", placeholder="Ex: Carrefour")
+    # Autocompletion: selectbox with text input fallback
+    use_existing = st.checkbox("Enseigne existante", value=bool(enseignes), key="man_use_existing")
+    if use_existing and enseignes:
+        me = st.selectbox("Enseigne", enseignes, key="man_enseigne_sel")
+    else:
+        me = st.text_input("Enseigne", key="man_enseigne", placeholder="Ex: Carrefour")
+
     c1, c2 = st.columns(2)
     with c1:
-        md_raw = st.text_input("Date", value=date.today().strftime("%Y-%m-%d"), key="man_date",
-                                help="Formats: YYYY-MM-DD, DD/MM, hier, lundi…")
-        md = parse_date(md_raw)
-        if md_raw.strip().lower() != md:
-            st.caption(f"📅 → {md}")
+        md = st.date_input("Date", value=date.today(), key="man_date")
     with c2:
-        mm = st.number_input("Montant €", value=0.0, min_value=0.0, step=0.01, format="%.2f", key="man_montant")
+        mm = st.number_input("Montant €", value=0.0, min_value=0.0, step=0.01, format="%.2f", key="man_montant",
+                              help="Astuce: tapez 2.5k pour 2500€")
 
     c3, c4 = st.columns(2)
     with c3:
@@ -152,19 +144,20 @@ with tab_man:
     with c5:
         man_tags = st.text_input("Tags", key="man_tags", placeholder="#vacances, #pro…")
     with c6:
-        if len(target_map) > 1:
-            man_target = st.selectbox("Pour", list(target_map.keys()), key="man_target")
-            man_target_uid = target_map[man_target]
-        else:
-            man_target_uid = uid
-            st.caption(f"Pour : {user['avatar']} {user['display_name']}")
+        man_comment = st.text_input("💬 Note", key="man_comment", placeholder="optionnel")
+
+    if len(target_map) > 1:
+        man_target = st.selectbox("Pour", list(target_map.keys()), key="man_target")
+        man_target_uid = target_map[man_target]
+    else:
+        man_target_uid = uid
 
     if st.button("💾 Enregistrer la dépense", type="primary", use_container_width=True, key="man_save"):
         if not me or mm <= 0:
             st.warning("⚠️ Remplissez l'enseigne et le montant.")
         else:
             added_by = uid if man_target_uid != uid else None
-            insert_transaction(man_target_uid, md, me, mm, mc, "", [], "depense", added_by=added_by)
+            insert_transaction(man_target_uid, md.strftime("%Y-%m-%d"), me, mm, mc, "", [], "depense", added_by=added_by)
             st.success("✅ Dépense enregistrée")
             st.balloons()
 
@@ -175,8 +168,7 @@ with tab_rev:
     re_ = st.text_input("Source", key="rev_source", placeholder="Salaire, freelance…")
     c1, c2 = st.columns(2)
     with c1:
-        rd_raw = st.text_input("Date", value=date.today().strftime("%Y-%m-%d"), key="rev_date")
-        rd = parse_date(rd_raw)
+        rd = st.date_input("Date", value=date.today(), key="rev_date")
     with c2:
         rm = st.number_input("Montant €", value=0.0, min_value=0.0, step=0.01, format="%.2f", key="rev_montant")
 
@@ -184,7 +176,7 @@ with tab_rev:
         if not re_ or rm <= 0:
             st.warning("⚠️ Remplissez la source et le montant.")
         else:
-            insert_transaction(uid, rd, re_, rm, "Revenu", "", [], "revenu")
+            insert_transaction(uid, rd.strftime("%Y-%m-%d"), re_, rm, "Revenu", "", [], "revenu")
             st.success("✅ Revenu enregistré")
             st.balloons()
 
@@ -196,11 +188,15 @@ with tab_split:
     if not friends:
         st.info("Ajoutez d'abord un(e) ami(e) dans la page 👥 Social.")
     else:
-        sp_ens = st.text_input("Enseigne", key="sp_ens", placeholder="Restaurant, courses…")
+        use_existing_sp = st.checkbox("Enseigne existante", value=bool(enseignes), key="sp_use_existing")
+        if use_existing_sp and enseignes:
+            sp_ens = st.selectbox("Enseigne", enseignes, key="sp_ens_sel")
+        else:
+            sp_ens = st.text_input("Enseigne", key="sp_ens", placeholder="Restaurant, courses…")
+
         c1, c2 = st.columns(2)
         with c1:
-            sp_date_raw = st.text_input("Date", value=date.today().strftime("%Y-%m-%d"), key="sp_date")
-            sp_date = parse_date(sp_date_raw)
+            sp_date = st.date_input("Date", value=date.today(), key="sp_date")
         with c2:
             sp_total = st.number_input("Montant total €", value=0.0, min_value=0.0, step=0.01, format="%.2f", key="sp_total")
 
@@ -239,16 +235,12 @@ with tab_split:
             if not sp_ens or sp_total <= 0:
                 st.warning("⚠️ Remplissez l'enseigne et le montant.")
             else:
-                # Create my transaction
-                tid = insert_transaction(uid, sp_date, sp_ens, sp_my_share, sp_cat, "", [], "depense")
-
-                # Create debt: other person owes their share
+                tid = insert_transaction(uid, sp_date.strftime("%Y-%m-%d"), sp_ens, sp_my_share, sp_cat, "", [], "depense")
                 if sp_split == "Je paie tout":
                     create_debt(sp_friend_id, uid, sp_other_share, f"Part de {sp_ens}", tid)
                 elif sp_split == "L'autre paie tout":
                     create_debt(uid, sp_friend_id, sp_my_share, f"Part de {sp_ens}", tid)
                 elif sp_other_share > 0 and sp_split in ("50/50", "Personnalisé"):
                     create_debt(sp_friend_id, uid, sp_other_share, f"Part de {sp_ens}", tid)
-
                 st.success(f"✅ Dépense enregistrée, dette de {sp_other_share:.2f}€ créée")
                 st.balloons()

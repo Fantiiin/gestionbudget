@@ -9,7 +9,8 @@ from database import (
     get_category_map, get_category_names, get_friends,
     get_user_by_id, ensure_user_has_categories,
     get_budgets, export_transactions_csv, update_transaction,
-    get_transaction_by_id,
+    get_transaction_by_id, duplicate_transaction, get_smart_budget_info,
+    get_unique_enseignes, update_user_preference,
 )
 from auth import require_auth, get_current_user_id, get_current_user, logout
 from styles import inject_css
@@ -36,11 +37,39 @@ def format_date_fr(ds):
         return ds
 
 
+# ─── Undo delete logic ───
+if "undo_txn" in st.session_state:
+    undo = st.session_state["undo_txn"]
+    c_undo1, c_undo2 = st.columns([4, 1])
+    with c_undo1:
+        st.warning(f"🗑️ Transaction « {undo['enseigne']} » supprimée")
+    with c_undo2:
+        if st.button("↩️ Annuler", key="undo_btn"):
+            from database import insert_transaction
+            insert_transaction(undo["user_id"], undo["date"], undo["enseigne"],
+                               undo["montant_total"], undo["categorie"], "", [],
+                               undo.get("type", "depense"), added_by=undo.get("added_by"))
+            del st.session_state["undo_txn"]
+            st.success("↩️ Restaurée"); st.rerun()
+    # Auto-clear after one render
+    if "undo_shown" in st.session_state:
+        del st.session_state["undo_txn"]
+        del st.session_state["undo_shown"]
+    else:
+        st.session_state["undo_shown"] = True
+
 # ─── Top Bar ───
-c_top1, c_top2 = st.columns([4, 1])
+c_top1, c_top2, c_top3 = st.columns([3.5, 0.5, 0.5])
 with c_top1:
     st.markdown(f"# {user['avatar']} Mon Budget")
 with c_top2:
+    current_theme = user.get("theme", "dark")
+    theme_icon = "☀️" if current_theme == "dark" else "🌙"
+    if st.button(theme_icon, key="theme_btn", help="Changer de thème"):
+        new_theme = "light" if current_theme == "dark" else "dark"
+        update_user_preference(uid, "theme", new_theme)
+        st.rerun()
+with c_top3:
     if st.button("🚪", key="logout_btn", help="Déconnexion"):
         logout(); st.rerun()
 
@@ -124,6 +153,25 @@ st.markdown(f"""<div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">🧾 Transactions</div><div class="kpi-val white">{len(txs)}</div></div>
 </div>""", unsafe_allow_html=True)
 
+# ─── Smart Budget Card ───
+if not viewing_readonly and periode == "Mois":
+    smart = get_smart_budget_info(uid, int(yr), mo)
+    if smart["has_budget"]:
+        sc = {"over": "#ef4444", "behind": "#fbbf24", "on_track": "#34d399", "ahead": "#818cf8"}.get(smart["status"], "#94a3b8")
+        pct = min((smart["spent"] / smart["total_budget"] * 100), 100) if smart["total_budget"] > 0 else 0
+        st.markdown(f"""<div class="glass" style="padding:0.7rem 1rem;margin-bottom:0.8rem;border-left:3px solid {sc}">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div>
+                    <div style="font-weight:700;color:{sc};font-size:0.9rem">🔥 {smart['message']}</div>
+                    <div style="color:#94a3b8;font-size:0.72rem;margin-top:2px">
+                        Jour {smart['days_elapsed']} · {smart['spent']:.0f}€/{smart['total_budget']:.0f}€ · Aujourd'hui: {smart['spent_today']:.0f}€
+                    </div>
+                </div>
+                <div style="font-size:1.8rem;font-weight:800;color:{sc}">{smart['daily_allowance']:.0f}€<span style="font-size:0.7rem;font-weight:400">/jour</span></div>
+            </div>
+            <div class="cat-track" style="height:6px;margin-top:6px"><div class="cat-fill" style="width:{pct:.0f}%;background:{sc}"></div></div>
+        </div>""", unsafe_allow_html=True)
+
 # ─── Export ───
 if not viewing_readonly:
     with st.expander("📤 Exporter"):
@@ -200,19 +248,27 @@ with col_main:
             with st.container():
                 ec1, ec2 = st.columns(2)
                 with ec1:
-                    e_ens = st.text_input("Enseigne", value=txn["enseigne"], key="edit_ens")
-                    e_date = st.text_input("Date", value=txn["date"], key="edit_date")
+                    enseignes = get_unique_enseignes(uid)
+                    e_ens = st.selectbox("Enseigne", enseignes + [txn["enseigne"]], index=len(enseignes) if txn["enseigne"] not in enseignes else enseignes.index(txn["enseigne"]), key="edit_ens")
+                    e_date = st.date_input("Date", value=datetime.strptime(txn["date"], "%Y-%m-%d").date(), key="edit_date")
                     e_tags = st.text_input("Tags", value=txn.get("tags", ""), key="edit_tags", placeholder="#vacances, #pro")
                 with ec2:
                     e_mt = st.number_input("Montant", value=txn["montant_total"], min_value=0.0, step=0.01, format="%.2f", key="edit_mt")
                     ci = view_cat_names.index(txn["categorie"]) if txn["categorie"] in view_cat_names else 0
                     e_cat = st.selectbox("Catégorie", view_cat_names, index=ci, key="edit_cat")
                     e_type = st.selectbox("Type", ["depense", "revenu"], index=0 if txn.get("type") == "depense" else 1, key="edit_type")
+                e_comment = st.text_input("💬 Note", value=txn.get("comment", ""), key="edit_comment", placeholder="anniversaire 🎂, arnaque 😤…")
 
                 bc1, bc2 = st.columns(2)
                 with bc1:
                     if st.button("💾 Sauvegarder", type="primary", use_container_width=True):
-                        update_transaction(txn["id"], e_date, e_ens, e_mt, e_cat, e_type, e_tags, txn.get("sous_categorie", ""))
+                        from database import get_connection
+                        conn = get_connection()
+                        conn.execute(
+                            "UPDATE transactions SET date=?, enseigne=?, montant_total=?, categorie=?, type=?, tags=?, comment=? WHERE id=?",
+                            (e_date.strftime("%Y-%m-%d"), e_ens, e_mt, e_cat, e_type, e_tags, e_comment, txn["id"])
+                        )
+                        conn.commit(); conn.close()
                         del st.session_state["edit_txn_id"]
                         st.success("✅ Modifiée"); st.rerun()
                 with bc2:
@@ -245,18 +301,32 @@ with col_main:
                 tag_s = ""
                 if t.get("tags"):
                     tag_s = f'<span style="color:#818cf8;font-size:0.6rem;margin-left:0.3rem">{t["tags"]}</span>'
-                tc, dc, ec = st.columns([5.5, 0.5, 0.5])
+                comment_s = ""
+                if t.get("comment"):
+                    comment_s = f'<div style="color:#94a3b8;font-size:0.62rem;font-style:italic">💬 {t["comment"]}</div>'
+                tc, dc, ec, fc = st.columns([5, 0.4, 0.4, 0.4])
                 with tc:
                     st.markdown(f"""<div class="txn"><div class="txn-row"><div class="txn-left">
                         <span class="txn-icon">{ic}</span>
-                        <div><div class="txn-ens">{t['enseigne']}{tag_s}</div><div class="txn-cat">{t['categorie']}</div>{abl}</div>
+                        <div><div class="txn-ens">{t['enseigne']}{tag_s}</div><div class="txn-cat">{t['categorie']}</div>{comment_s}{abl}</div>
                         </div><span class="txn-amt {ac}">{sg}{t['montant_total']:.2f}€</span></div></div>""", unsafe_allow_html=True)
                 if not viewing_readonly:
                     with dc:
+                        if st.button("📋", key=f"dup{t['id']}", help="Dupliquer"):
+                            duplicate_transaction(t["id"])
+                            st.toast("📋 Dupliquée !"); st.rerun()
+                    with ec:
                         if st.button("✏️", key=f"e{t['id']}"):
                             st.session_state["edit_txn_id"] = t["id"]; st.rerun()
-                    with ec:
+                    with fc:
                         if st.button("🗑️", key=f"d{t['id']}"):
+                            # Undo: save to session before deleting
+                            st.session_state["undo_txn"] = {
+                                "user_id": t.get("user_id", uid), "date": t["date"],
+                                "enseigne": t["enseigne"], "montant_total": t["montant_total"],
+                                "categorie": t["categorie"], "type": t.get("type", "depense"),
+                                "added_by": t.get("added_by"),
+                            }
                             delete_transaction(t["id"]); st.rerun()
             st.markdown("")
 
@@ -268,16 +338,13 @@ with col_main:
             ci = view_cat_map.get(t["categorie"], {})
             ir = t.get("type") == "revenu"
             sg = "+" if ir else "−"
-            ab = ""
-            if t.get("added_by") and t["added_by"] != viewing_uid:
-                u = get_user_by_id(t["added_by"])
-                if u: ab = f" (par {u['display_name']})"
             td.append({
-                "Date": t["date"], "Enseigne": t["enseigne"] + ab,
+                "Date": t["date"], "Enseigne": t["enseigne"],
                 "Montant": f"{sg}{t['montant_total']:.2f}€",
                 "Catégorie": f"{ci.get('icon','')} {t['categorie']}",
                 "Type": "Revenu" if ir else "Dépense",
                 "Tags": t.get("tags", ""),
+                "Note": t.get("comment", ""),
             })
         sel = st.dataframe(td, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row")
         sr = sel.selection.rows if sel.selection else []
@@ -303,13 +370,22 @@ with col_main:
             ir = t.get("type") == "revenu"
             sg = "+" if ir else "−"
             co = "#34d399" if ir else "#f87171"
-            c1, c2, c3, c4, c5, c6 = st.columns([0.3, 2.2, 1.3, 1, 0.3, 0.3])
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([0.3, 2, 1.2, 1, 0.3, 0.3, 0.3])
             with c1: st.markdown(f"<span style='font-size:1rem'>{ic}</span>", unsafe_allow_html=True)
             with c2: st.markdown(f"**{t['enseigne']}**")
             with c3: st.caption(format_date_fr(t["date"]))
             with c4: st.markdown(f"<span style='color:{co};font-weight:600'>{sg}{t['montant_total']:.2f}€</span>", unsafe_allow_html=True)
             if not viewing_readonly:
                 with c5:
-                    if st.button("✏️", key=f"ce{t['id']}"): st.session_state["edit_txn_id"] = t["id"]; st.rerun()
+                    if st.button("📋", key=f"cdup{t['id']}"): duplicate_transaction(t["id"]); st.rerun()
                 with c6:
-                    if st.button("✕", key=f"cd{t['id']}"): delete_transaction(t["id"]); st.rerun()
+                    if st.button("✏️", key=f"ce{t['id']}"): st.session_state["edit_txn_id"] = t["id"]; st.rerun()
+                with c7:
+                    if st.button("✕", key=f"cd{t['id']}"):
+                        st.session_state["undo_txn"] = {
+                            "user_id": t.get("user_id", uid), "date": t["date"],
+                            "enseigne": t["enseigne"], "montant_total": t["montant_total"],
+                            "categorie": t["categorie"], "type": t.get("type", "depense"),
+                            "added_by": t.get("added_by"),
+                        }
+                        delete_transaction(t["id"]); st.rerun()

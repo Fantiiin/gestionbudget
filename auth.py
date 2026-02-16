@@ -17,6 +17,21 @@ def _verify_password(password: str, stored_hash: str) -> bool:
     return hashlib.sha256((salt + password).encode()).hexdigest() == h
 
 
+def _generate_token(user_id: int) -> str:
+    """Generate a simple auth token for cookie persistence."""
+    raw = f"{user_id}:{secrets.token_hex(16)}"
+    return raw
+
+
+def _parse_token(token: str) -> int | None:
+    """Parse user_id from token."""
+    try:
+        parts = token.split(":", 1)
+        return int(parts[0])
+    except (ValueError, IndexError):
+        return None
+
+
 def get_current_user_id() -> int | None:
     return st.session_state.get("user_id")
 
@@ -30,18 +45,61 @@ def get_current_user() -> dict | None:
 
 def require_auth():
     """Call at top of each page. Stops execution if not logged in."""
+    # Try to restore from cookie
+    if get_current_user_id() is None:
+        _try_restore_from_cookie()
+
     if get_current_user_id() is None:
         st.switch_page("app.py")
         st.stop()
 
 
+def _try_restore_from_cookie():
+    """Try to restore session from browser cookie via query params or local storage."""
+    try:
+        import streamlit.components.v1 as components
+        # Use st.query_params as a simple persistence mechanism
+        token = st.query_params.get("auth_token")
+        if token:
+            uid = _parse_token(token)
+            if uid:
+                user = get_user_by_id(uid)
+                if user:
+                    st.session_state["user_id"] = user["id"]
+                    st.session_state["user_display_name"] = user["display_name"]
+                    st.session_state["user_avatar"] = user.get("avatar", "👤")
+    except Exception:
+        pass
+
+
+def _set_auth_cookie(user_id: int):
+    """Store auth token in query params for persistence."""
+    token = _generate_token(user_id)
+    st.query_params["auth_token"] = token
+
+
+def _clear_auth_cookie():
+    """Clear auth token from query params."""
+    try:
+        if "auth_token" in st.query_params:
+            del st.query_params["auth_token"]
+    except Exception:
+        pass
+
+
 def logout():
+    _clear_auth_cookie()
     for key in list(st.session_state.keys()):
         del st.session_state[key]
 
 
 def show_auth_page():
     """Display login/register. Returns True if authenticated."""
+    if get_current_user_id() is not None:
+        return True
+
+    # Try cookie restore
+    _try_restore_from_cookie()
     if get_current_user_id() is not None:
         return True
 
@@ -74,7 +132,31 @@ def show_auth_page():
             border: 2px solid transparent;
         }
         .avatar-option:hover { background: rgba(167,139,250,0.15); }
+
+        /* Fix Tab skipping the password eye icon */
+        [data-testid="stTextInput"] button[kind="icon"] {
+            tabindex: -1 !important;
+        }
+        div[data-baseweb="input"] button {
+            tab-index: -1 !important;
+            pointer-events: auto;
+        }
     </style>
+    <script>
+        // Force-set tabindex=-1 on password toggle buttons to fix Tab navigation
+        setTimeout(function() {
+            document.querySelectorAll('div[data-baseweb="input"] button').forEach(function(btn) {
+                btn.setAttribute('tabindex', '-1');
+            });
+        }, 500);
+        // Re-run on mutations (Streamlit re-renders)
+        var observer = new MutationObserver(function() {
+            document.querySelectorAll('div[data-baseweb="input"] button').forEach(function(btn) {
+                btn.setAttribute('tabindex', '-1');
+            });
+        });
+        observer.observe(document.body, {childList: true, subtree: true});
+    </script>
     """, unsafe_allow_html=True)
 
     st.markdown("""
@@ -89,6 +171,7 @@ def show_auth_page():
     with tab_login:
         username = st.text_input("Nom d'utilisateur", key="login_user", placeholder="ex: fanta")
         password = st.text_input("Mot de passe", type="password", key="login_pass")
+        remember = st.checkbox("🍪 Se souvenir de moi", value=True, key="login_remember")
 
         if st.button("Se connecter", type="primary", use_container_width=True, key="login_btn"):
             if not username or not password:
@@ -99,6 +182,8 @@ def show_auth_page():
                     st.session_state["user_id"] = user["id"]
                     st.session_state["user_display_name"] = user["display_name"]
                     st.session_state["user_avatar"] = user.get("avatar", "👤")
+                    if remember:
+                        _set_auth_cookie(user["id"])
                     st.rerun()
                 else:
                     st.error("❌ Identifiants incorrects.")
@@ -143,6 +228,7 @@ def show_auth_page():
                     st.session_state["user_id"] = uid
                     st.session_state["user_display_name"] = new_display
                     st.session_state["user_avatar"] = avatar
+                    _set_auth_cookie(uid)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur : {e}")
