@@ -1,1 +1,7 @@
-/.env
+# Budget Tracker
+.env
+budget.db
+receipts/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
